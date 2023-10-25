@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<title>three-line-fill</title>
+	<style type="text/css">
+		body, html{
+			margin: 0px;
+		}
+	</style>
+</head>
+<body>
+	<script type="module">
+		import * as THREE from '../three.js-131/build/three.module.js';
+		import { GLTFLoader } from '../three.js-131/examples/jsm/loaders/GLTFLoader.js';
+		import { OrbitControls } from '../three.js-131/examples/jsm/controls/OrbitControls.js';
+		import BackgroundMaterial from './BackgroundMaterial.js';
+
+		const MODEl_URL = './max_walk_low.glb';
+
+		const clock = new THREE.Clock();
+		const loader = new GLTFLoader();
+
+		let camera, scene, renderer, model, light, material, mixer, animations, control, cshader;
+
+		const initModel = async () => {
+			return new Promise((resolve) => {
+				loader.load(MODEl_URL,  (gltf) => {
+					model = gltf.scene;
+					animations = gltf.animations;
+
+					model.traverse((child) => {
+						if (child.isSkinnedMesh) {
+							child.material = material;
+							child.castShadow = true;
+							child.receiveShadow = true;
+						}
+					});
+
+					//model.scale.set(5,5,5);
+
+					mixer = new THREE.AnimationMixer(model);
+					const action = mixer.clipAction(animations[0]);
+
+					action.play();
+
+					resolve(true);
+				});
+			});	
+		};
+
+		const initMaterial = () => {
+			const urls = [
+			  	'https://s3-us-west-2.amazonaws.com/s.cdpn.io/304639/pos-x.png', 
+			  	'https://s3-us-west-2.amazonaws.com/s.cdpn.io/304639/neg-x.png', 
+			  	'https://s3-us-west-2.amazonaws.com/s.cdpn.io/304639/pos-y.png', 
+			  	'https://s3-us-west-2.amazonaws.com/s.cdpn.io/304639/neg-y.png', 
+			  	'https://s3-us-west-2.amazonaws.com/s.cdpn.io/304639/pos-z.png', 
+			  	'https://s3-us-west-2.amazonaws.com/s.cdpn.io/304639/neg-z.png'
+			];
+
+			const textureCube = new THREE.CubeTextureLoader().load(urls);
+			textureCube.format = THREE.RGBFormat;
+			textureCube.mapping = THREE.CubeReflectionMapping;
+
+			material = new THREE.MeshPhysicalMaterial({
+		      	color: 0x333650,
+			      metalness: 0.35,
+			      roughness: 0.125,
+			      envMap: textureCube,
+			      envMapIntensity: 2,
+			      flatShading: true
+		    });
+
+			material.onBeforeCompile = shader => {
+				cshader = shader;
+
+		      	//uniforms = shader.uniforms;
+		      	
+		      	Object.assign(shader.uniforms, {
+      				u_time: { value: 0 }
+    			});
+
+		      	shader.vertexShader = `
+		          	varying vec3 vNormal;
+					varying vec3 vPosition;
+
+
+		          	${shader.vertexShader}
+		          	`.replace('#include <project_vertex>', `
+		         		 	vNormal = normal;
+		         		 	vPosition = position;
+
+		          			#include <project_vertex>
+		          	`);
+		      	
+		      		shader.fragmentShader = `
+		        		varying vec3 vNormal;
+						varying vec3 vPosition;
+
+		        		${shader.fragmentShader}
+		      		`.replace(`#include <dithering_fragment>`,
+			    	`#include <dithering_fragment>
+		        		vec3 n = normalize(vNormal);
+		        		vec3 dx = dFdx(n);
+						  vec3 dy = dFdy(n);
+						  vec3 xneg = n - dx;
+						  vec3 xpos = n + dx;
+						  vec3 yneg = n - dy;
+						  vec3 ypos = n + dy;
+						  float depth = length(vPosition);
+						  float curvature = (cross(xneg, xpos).y - cross(yneg, ypos).x) * 4.0 / depth;
+
+						  // Compute surface properties
+						  float corrosion = clamp(-curvature * 3.0, 0.0, 1.0);
+						  float shine = clamp(curvature * 5.0, 0.0, 1.0);
+						  vec3 light = normalize(vec3(0.0, 1.0, 10.0));
+						  vec3 ambient = vec3(0.15, 0.1, 0.1);
+						  vec3 diffuse = mix(mix(vec3(0.3, 0.25, 0.2), vec3(0.45, 0.5, 0.5), corrosion),
+						    vec3(0.5, 0.4, 0.3), shine) - ambient;
+						  vec3 specular = mix(vec3(0.0), vec3(1.0) - ambient - diffuse, shine);
+						  float shininess = 128.0;
+
+						  /*float dirt = clamp(0.25 - curvature * 4.0, 0.0, 1.0);
+						  vec3 light = normalize(vec3(0.0, 1.0, 10.0));
+						  vec3 ambient = vec3(0.1, 0.05, 0.0);
+						  vec3 diffuse = mix(vec3(0.4, 0.15, 0.1), vec3(0.4, 0.3, 0.3), dirt) - ambient;
+						  vec3 specular = mix(vec3(0.15) - ambient, vec3(0.0), dirt);
+						  float shininess = 32.0;*/
+
+						  // Compute final color
+						  float cosAngle = dot(n, light);
+						  gl_FragColor.rgb = ambient +
+						    diffuse * max(0.0, cosAngle) +
+						    specular * pow(max(0.0, cosAngle), shininess);
+		        	`);
+
+		        	
+		      	}
+			}
+		
+
+		const init = async () => {
+			camera = new THREE.PerspectiveCamera(85, window.innerWidth / window.innerHeight, .01, 100);
+			camera.position.set(0, .8, 2);
+			scene = new THREE.Scene();
+			//scene.fog = new THREE.FogExp2(0x000000, 0.2);
+			camera.lookAt(scene.position);
+
+			renderer = new THREE.WebGLRenderer({
+				antialias:true,
+				transparent:false,
+			});
+			
+			renderer.shadowMap.enabled = true;
+        	renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        	//renderer.physicallyCorrectLights = true;
+
+			document.body.appendChild(renderer.domElement);
+
+			renderer.setSize(window.innerWidth, window.innerHeight);
+
+			const backgroundGeometry = new THREE.SphereGeometry(40, 32, 15);
+		    const backgroundMaterial = new BackgroundMaterial();
+		    const background = new THREE.Mesh(backgroundGeometry, backgroundMaterial);
+		    scene.add(background);
+
+			initMaterial();
+			await initModel();
+
+			scene.add(model);
+
+			 const directionalLight = new THREE.DirectionalLight(0xffffff, 0.5);
+		    directionalLight.position.set(-1, 1, 1);
+		    directionalLight.castShadow = true;
+		    // this.scene.add(directionalLight);
+
+		    const directionalLight2 = new THREE.DirectionalLight(0xffffff, 0.2);
+		    directionalLight2.position.set(1, 2, 1);
+		    directionalLight2.castShadow = true;
+		    // this.scene.add(directionalLight2);
+
+		    const ambientLight = new THREE.AmbientLight(0x306090, 0.2);
+		    scene.add(ambientLight);
+
+		    const light = new THREE.HemisphereLight(0xaaaeff, 0x66aaf0, 0.6);
+		    scene.add(light);
+
+           /* const pgeometry = new THREE.PlaneGeometry( 30, 30, 150, 150 );
+           //pgeometry.applyMatrix( new THREE.Matrix4().makeRotationX( - Math.PI / 2 ) );
+
+            const pmaterial = new THREE.MeshStandardMaterial( {
+            	color: 0x333333,
+            	//side:THREE.DoubleSide,
+            	//wireframe:true
+            } );
+
+            const pmesh = new THREE.Mesh( pgeometry, pmaterial );
+           	pmesh.rotateX(-Math.PI * .5)
+            pmesh.castShadow = true;
+            pmesh.receiveShadow = true;
+
+            scene.add( pmesh );*/
+
+			control= new OrbitControls(camera, renderer.domElement);
+			control.target = new THREE.Vector3(0,.5,0);
+
+			update();
+		};
+
+		const update = () => {
+			requestAnimationFrame(update);
+			const delta = clock.getDelta();
+			if(material){
+				control.update();
+				mixer.update(delta);
+				//console.log(material);
+
+				if(cshader){
+					const time = clock.getElapsedTime();
+					cshader.uniforms.u_time.value = time;
+					//cshader.uniforms.hPlane.value = .65 + Math.sin(time);
+				}
+
+				renderer.render(scene, camera);
+			}
+			
+		};
+
+		init();
+
+	</script>
+</body>
+</html>

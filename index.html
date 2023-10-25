@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<title>line material</title>
+	<link rel="stylesheet" type="text/css" href="./css/style.css">
+	<style type="text/css">
+		.title{
+			width:800px;
+		}
+	</style>
+</head>
+<body>
+	<div class="title">Line material</div>
+	<div class="subtitle">WebGL Effect<div class="info">Done with three.js</div>
+
+	<script type="module">
+		import * as THREE from './libs/build/three.module.js';
+		import { GLTFLoader } from './libs/examples/jsm/loaders/GLTFLoader.js';
+		import { OrbitControls } from './libs/examples/jsm/controls/OrbitControls.js';
+		import BackgroundMaterial from './src/BackgroundMaterial.js';
+
+		const MODEl_URL = './models/amelie_belly.glb';
+
+		const clock = new THREE.Clock();
+		const loader = new GLTFLoader();
+		const title = document.querySelector('.title');
+		const subtitle = document.querySelector('.subtitle');
+
+		let camera, scene, renderer, model, light, material, material2, mixer, mixer2, animations, control, cshader, cshader2;
+
+		const resetClonedSkinnedMeshes = (source, clone) =>{
+		  	const clonedMeshes = [];
+		  	const meshSources = {};
+		  	const boneClones = {};
+
+		  	parallelTraverse(source, clone, function (sourceNode, clonedNode) {
+		    	if (sourceNode.isSkinnedMesh) {
+		      		meshSources[clonedNode.uuid] = sourceNode;
+		      		clonedMeshes.push(clonedNode);
+		    	}
+		    
+		    	if (sourceNode.isBone)
+		    		boneClones[sourceNode.uuid] = clonedNode;
+		  	});
+
+		  	for (let i = 0, l = clonedMeshes.length; i < l; i++) {
+		    	const clone = clonedMeshes[i];
+		   		const sourceMesh = meshSources[clone.uuid];
+		    	const sourceBones = sourceMesh.skeleton.bones;
+
+		    	clone.skeleton = sourceMesh.skeleton.clone();
+		    	clone.bindMatrix.copy(sourceMesh.bindMatrix);
+
+		    	clone.skeleton.bones = sourceBones.map((bone) => {
+		      		return boneClones[bone.uuid];
+		    	});
+
+		    	clone.bind(clone.skeleton, clone.bindMatrix);
+		  	}
+		}
+
+		const parallelTraverse = (a, b, callback) => {
+		  	callback(a, b);
+
+		  	for (let i = 0; i < a.children.length; i++) {
+		    	parallelTraverse(a.children[i], b.children[i], callback);
+		  	}
+		}
+
+		let clonedScene;
+
+		const initModel = async () => {
+			return new Promise((resolve) => {
+				loader.load(MODEl_URL,  (gltf) => {
+					model = gltf.scene;
+					animations = gltf.animations;
+					
+					clonedScene = model.clone();
+					resetClonedSkinnedMeshes(model, clonedScene);
+
+					model.traverse((child) => {
+						if (child.isSkinnedMesh) {
+							child.material = material;
+							child.castShadow = true;
+							child.receiveShadow = true;
+						}
+					});
+
+					/*clonedScene.traverse((child) => {
+						if (child.isSkinnedMesh) {
+							child.material = material2;
+						}
+					});*/
+
+					//model.scale.set(5,5,5);
+
+					mixer = new THREE.AnimationMixer(model);
+					const action = mixer.clipAction(animations[0]);
+					action.play();
+
+					mixer2 = new THREE.AnimationMixer(clonedScene);
+					const action2 = mixer2.clipAction(animations[0]);
+					action2.play();
+
+					resolve(true);
+				});
+			});	
+		};
+
+		const initMaterial2 = () => {
+
+			material2 = new THREE.MeshStandardMaterial({
+			  	color: "red",
+			  	side: THREE.DoubleSide,
+			  	transparent: true,
+			});
+
+			material2.extensions = { derivatives: true };
+
+			material2.onBeforeCompile = shader => {
+				cshader2 = shader;
+
+			  	shader.vertexShader = `
+			  		varying vec2 posXY;
+				` + shader.vertexShader;
+			 	
+			 	shader.vertexShader = shader.vertexShader.replace(
+			    	`#include <fog_vertex>`,
+			    	`#include <fog_vertex>
+
+			    	transformed *= .28 ;
+
+					posXY = (modelMatrix * vec4( transformed, 1.0 )).xy;
+					`
+			  	);
+
+			  	shader.fragmentShader = `
+			  		varying vec2 posXY;
+				` + shader.fragmentShader;
+			  	
+			
+			  	shader.fragmentShader = shader.fragmentShader.replace(
+			    	`#include <dithering_fragment>`,
+			    	`#include <dithering_fragment>
+			  		
+			  		gl_FragColor.rgb = vec3(1., 0., 0.);			  		
+
+				`);
+			};
+		};
+
+		const initMaterial = () => {
+			const uniforms = {
+			  	vGap: { value: 0.03 }, // vertical gap between layers
+			  	hPlane: { value: -0.1 } // height plane
+			};
+
+			material = new THREE.MeshStandardMaterial({
+			  	color: "white",
+			  	side: THREE.DoubleSide,
+			  	transparent: true,
+			});
+
+			material.extensions = { derivatives: true };
+
+			material.onBeforeCompile = shader => {
+				cshader = shader;
+
+			  	shader.uniforms.vGap = uniforms.vGap;
+			  	shader.uniforms.hPlane = uniforms.hPlane;
+			  	shader.vertexShader = `
+			  		varying vec2 posXY;
+			  		//varying vec3 posXYZ;
+				` + shader.vertexShader;
+			 	
+			 	shader.vertexShader = shader.vertexShader.replace(
+			    	`#include <fog_vertex>`,
+			    	`#include <fog_vertex>
+			    	//transformed += normal * normalMatrix * 1.2;
+					posXY = (modelMatrix * vec4( transformed, 1.0 )).xy;
+					`
+			  	);
+
+			  	shader.fragmentShader = `
+			  		uniform float vGap;
+			  		uniform float hPlane;
+			  		uniform sampler2D uTex;
+
+			  		varying vec2 posXY;
+				` + shader.fragmentShader;
+			  	
+			  	shader.fragmentShader = shader.fragmentShader.replace(
+			    	`#include <clipping_planes_pars_fragment>`,
+			    	`#include <clipping_planes_pars_fragment>
+
+					//http://madebyevan.com/shaders/grid/
+					float line(float coord){
+			  			float l = abs(fract(coord - 0.5) - 0.5) / fwidth(coord) * .75;
+			  			return 1. - min(l, 1.);
+					}
+
+					/*float line(vec2 c){
+  						vec2 grid = abs(fract(c - 0.5) - 0.5) / fwidth(c);
+  						float line = min(grid.x, grid.y);
+  						//float coord = length(c);
+  						//float line = abs(fract(coord - 0.5) - 0.5) / fwidth(coord);
+
+  						return 1.0 - min(line, 1.0);
+					}*/
+				`);	
+			  	
+			  	shader.fragmentShader = shader.fragmentShader.replace(
+			    	`#include <dithering_fragment>`,
+			    	`#include <dithering_fragment>
+			  		float line = line(posXY.y / vGap - 0.3);
+			  		if (line < 0.1 && posXY.y > hPlane) discard;
+
+			  		//float line = line(posXY / vGap - 0.3);
+			  		//if (line < 0.1 && posXY.y > hPlane) discard;
+
+			  		float e = fwidth(posXY.y);
+			  		vec3 col = mix(diffuse, gl_FragColor.rgb, step(posXY.y, hPlane));
+			  		float alpha = mix( 1., 0., step(posXY.y, hPlane));
+			  		gl_FragColor.rgb = col;//gl_FrontFacing ? col : vec3(1.,.7, 0.);
+			  		gl_FragColor.a = alpha;
+
+				`);
+			};
+		};
+
+		const init = async () => {
+			camera = new THREE.PerspectiveCamera(85, window.innerWidth / window.innerHeight, .01, 100);
+			camera.position.set(0, .8, 1.3);
+			scene = new THREE.Scene();
+			//scene.fog = new THREE.FogExp2(0x000000, 0.2);
+			camera.lookAt(scene.position);
+
+			renderer = new THREE.WebGLRenderer({
+				antialias:true,
+				transparent:true,
+			});
+			
+			renderer.shadowMap.enabled = true;
+        	renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        	renderer.physicallyCorrectLights = true;
+
+			document.body.appendChild(renderer.domElement);
+
+			renderer.setSize(window.innerWidth, window.innerHeight);
+
+			const backgroundGeometry = new THREE.SphereGeometry(40, 32, 15);
+		    const backgroundMaterial = new BackgroundMaterial();
+		    const background = new THREE.Mesh(backgroundGeometry, backgroundMaterial);
+		    scene.add(background);
+
+			initMaterial();
+			//initMaterial2();
+
+			await initModel();
+
+			scene.add(model);
+			//scene.add(clonedScene);
+
+			/* const directionalLight = new THREE.DirectionalLight(0xffffff, 0.5);
+		    directionalLight.position.set(-1, 1, 1);
+		    directionalLight.castShadow = true;
+		    // this.scene.add(directionalLight);
+
+		    const directionalLight2 = new THREE.DirectionalLight(0xffffff, 0.2);
+		    directionalLight2.position.set(1, 2, 1);
+		    directionalLight2.castShadow = true;
+		    // this.scene.add(directionalLight2);
+		    */
+
+		    const ambientLight = new THREE.AmbientLight(0x306090, 0.2);
+		    scene.add(ambientLight);
+
+		    const light = new THREE.HemisphereLight(0xaaaeff, 0x66aaf0, 0.6);
+		    scene.add(light);
+
+           /* const pgeometry = new THREE.PlaneGeometry( 30, 30, 150, 150 );
+           //pgeometry.applyMatrix( new THREE.Matrix4().makeRotationX( - Math.PI / 2 ) );
+
+            const pmaterial = new THREE.MeshStandardMaterial( {
+            	color: 0x333333,
+            	//side:THREE.DoubleSide,
+            	//wireframe:true
+            } );
+
+            const pmesh = new THREE.Mesh( pgeometry, pmaterial );
+           	pmesh.rotateX(-Math.PI * .5)
+            pmesh.castShadow = true;
+            pmesh.receiveShadow = true;
+
+            scene.add( pmesh );*/
+
+			control= new OrbitControls(camera, renderer.domElement);
+			control.target = new THREE.Vector3(0,1.,0);
+
+			title.classList.add('show')
+			subtitle.classList.add('show')
+
+			update();
+		};
+
+		const update = () => {
+			requestAnimationFrame(update);
+			const delta = clock.getDelta();
+			if(material){
+				control.update();
+				mixer.update(delta);
+				mixer2.update(delta);
+				//console.log(material);
+
+				if(cshader){
+					const time = clock.getElapsedTime();
+					//cshader.uniforms.u_time.value = time;
+					cshader.uniforms.hPlane.value = .65 + Math.sin(time);
+				}
+
+				renderer.render(scene, camera);
+			}
+			
+		};
+
+		init();
+
+	</script>
+</body>
+</html>
